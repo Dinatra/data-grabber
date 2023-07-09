@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
@@ -70,13 +69,6 @@ func sendFile(browser string, file *os.File, wg *sync.WaitGroup) {
 	}
 
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatalf("Error reading response body: %v", err)
-	}
-
-	fmt.Printf("Response: %s\n", body)
-
 }
 
 func getFullName(path string, browser string) string {
